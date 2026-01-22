@@ -38,17 +38,28 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-gradle-debug-
 
+      # NOVO PASSO: Garante que existe uma chave de debug para assinar o app
+      - name: Gerar Debug Keystore (se faltar)
+        run: |
+          cd android/app
+          if [ ! -f "debug.keystore" ]; then
+            echo "Gerando debug.keystore..."
+            keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
       - name: Dar permissão de execução ao Gradlew
         run: cd android && chmod +x gradlew
 
       - name: Gerar APK Debug (Standalone)
         run: |
           cd android
-          # -PbundleInDebug=true força o JS a ser empacotado no APK de debug
+          # -PbundleInDebug=true: Empacota o JS dentro do APK
+          # --stacktrace: Mostra o erro real se falhar
           ./gradlew assembleDebug \
             -PbundleInDebug=true \
             -Dorg.gradle.jvmargs="-Xmx4g -XX:MaxMetaspaceSize=1g" \
-            --no-daemon
+            --no-daemon \
+            --stacktrace
 
       - name: Upload do APK Debug (Artifact)
         uses: actions/upload-artifact@v4
