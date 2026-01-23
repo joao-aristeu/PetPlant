@@ -1,4 +1,4 @@
-name: Build Android APK (Debug)
+name: Build Android APK (Standalone)
 
 on:
   push:
@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-android-debug:
+  build-android:
     runs-on: ubuntu-latest
 
     steps:
@@ -34,35 +34,37 @@ jobs:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
-          key: ${{ runner.os }}-gradle-debug-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
           restore-keys: |
-            ${{ runner.os }}-gradle-debug-
+            ${{ runner.os }}-gradle-
 
-      # NOVO PASSO: Garante que existe uma chave de debug para assinar o app
-      - name: Gerar Debug Keystore (se faltar)
+      # PASSO 1: Gera uma chave de debug temporária para assinar o app
+      - name: Gerar Keystore Temporária
         run: |
           cd android/app
-          if [ ! -f "debug.keystore" ]; then
-            echo "Gerando debug.keystore..."
-            keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
-          fi
+          keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+          echo "Keystore gerada em $(pwd)/debug.keystore"
 
       - name: Dar permissão de execução ao Gradlew
         run: cd android && chmod +x gradlew
 
-      - name: Gerar APK Debug (Standalone)
+      # PASSO 2: Gera o APK RELEASE (Standalone) usando a chave de debug
+      # Isso garante que o app rode sozinho sem precisar do Metro Bundler
+      - name: Gerar APK Release (Assinado com Debug Key)
         run: |
           cd android
-          # -PbundleInDebug=true: Empacota o JS dentro do APK
-          # --stacktrace: Mostra o erro real se falhar
-          ./gradlew assembleDebug \
-            -PbundleInDebug=true \
+          ./gradlew assembleRelease \
+            -Pandroid.injected.signing.store.file=$(pwd)/app/debug.keystore \
+            -Pandroid.injected.signing.store.password=android \
+            -Pandroid.injected.signing.key.alias=androiddebugkey \
+            -Pandroid.injected.signing.key.password=android \
+            -x lint \
             -Dorg.gradle.jvmargs="-Xmx4g -XX:MaxMetaspaceSize=1g" \
             --no-daemon \
             --stacktrace
 
-      - name: Upload do APK Debug (Artifact)
+      - name: Upload do APK (Artifact)
         uses: actions/upload-artifact@v4
         with:
-          name: app-debug
-          path: android/app/build/outputs/apk/debug/app-debug.apk
+          name: app-release-standalone
+          path: android/app/build/outputs/apk/release/app-release.apk
