@@ -22,7 +22,7 @@ jobs:
       - name: Configurar Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '18'
+          node-version: '20' # ATUALIZADO: Node 18 causa erro "toReversed is not a function"
           cache: 'npm'
 
       - name: Instalar Dependências (NPM)
