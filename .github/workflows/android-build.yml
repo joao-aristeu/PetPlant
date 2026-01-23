@@ -39,9 +39,11 @@ jobs:
             ${{ runner.os }}-gradle-
 
       # PASSO 1: Gera uma chave de debug temporária para assinar o app
+      # CORREÇÃO: Adicionado 'rm -f debug.keystore' para apagar a antiga antes de criar
       - name: Gerar Keystore Temporária
         run: |
           cd android/app
+          rm -f debug.keystore
           keytool -genkey -v -keystore debug.keystore -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
           echo "Keystore gerada em $(pwd)/debug.keystore"
 
