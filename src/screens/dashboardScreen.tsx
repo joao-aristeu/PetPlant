@@ -224,7 +224,7 @@ export const DashboardScreen: React.FC<DashboardProps> = ({
     if (!currentPot) return;
     const newState = !currentState;
     const topic = actuator === 'light' ? "plant/actuators/light" : "plant/actuators/pump";
-    mqttService.publish(topic, newState ? 'OFF' : 'ON');
+    mqttService.publish(topic, newState ? 'ON' : 'OFF');
     onUpdatePot({ ...currentPot, [actuator === 'pump' ? 'pumpOn' : 'lightOn']: newState });
   };
 

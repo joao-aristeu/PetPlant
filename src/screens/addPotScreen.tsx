@@ -1,51 +1,25 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { 
-  View, 
-  Text, 
-  StyleSheet, 
-  TouchableOpacity, 
-  ActivityIndicator, 
-  Image, 
-  ScrollView, 
-  StatusBar, 
-  Dimensions, 
-  Alert,
-  TextInput,
-  Platform,
-  PermissionsAndroid,
-  KeyboardAvoidingView,
+  View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, 
+  Image, ScrollView, StatusBar, Alert, TextInput, 
+  Platform, PermissionsAndroid, KeyboardAvoidingView 
 } from 'react-native';
 import { 
-  ChevronLeft, 
-  Camera, 
-  Bluetooth, 
-  Wifi, 
-  Check, 
-  Sprout,
-  ChevronDown,
-  ChevronUp,
-  Lock,
-  RefreshCw,
-  Send
+  ChevronLeft, Camera, Bluetooth, Wifi, Check, Sprout, 
+  ChevronDown, ChevronUp, Lock, RefreshCw, Send 
 } from 'lucide-react-native';
-import { BleManager, Device } from 'react-native-ble-plx';
-import { colors } from '../styles/theme';
+import { Device } from 'react-native-ble-plx'; // Apenas os tipos são necessários aqui
 import { launchCamera, launchImageLibrary } from 'react-native-image-picker';
 import WifiManager from 'react-native-wifi-reborn';
-import { Buffer } from 'buffer'; 
 
-const { width } = Dimensions.get('window');
+// IMPORTANTE: Ajuste o caminho conforme sua estrutura de pastas
+import { BleService } from '../services/bleService'; 
+import { colors } from '../styles/theme'; 
 
-// --- CONFIGURAÇÕES DO ESP32 ---
-const SERVICE_UUID = "12345678-1234-1234-1234-1234567890ab";
-const CHAR_UUID    = "abcd1234-5678-90ab-cdef-1234567890ab";
+// Inicializa o Serviço (Singleton)
+const bleService = new BleService((msg) => console.log(msg));
 
-const bleManager = new BleManager();
-
-const toBase64 = (text: string) => Buffer.from(text).toString('base64');
-const fromBase64 = (base64: string) => Buffer.from(base64, 'base64').toString('utf-8');
-
-// --- DATABASE DE PLANTAS (Nome Popular -> Espécie Técnica) ---
+// --- DATABASE DE PLANTAS ---
 const PLANT_DATABASE: Record<string, string> = {
   "Jiboia": "Epipremnum aureum",
   "Samambaia": "Nephrolepis exaltata",
@@ -63,15 +37,13 @@ const PLANT_DATABASE: Record<string, string> = {
 const PREDEFINED_NAMES = Object.keys(PLANT_DATABASE);
 const PREDEFINED_SPECIES = Array.from(new Set(Object.values(PLANT_DATABASE)));
 
-// Componente Combo (Dropdown editável)
+// --- Componente Combo (Dropdown) ---
 const EditableSelect = ({ label, value, onChangeText, options, placeholder }: any) => {
   const [isOpen, setIsOpen] = useState(false);
-  
   const handleSelect = (item: string) => { 
-    onChangeText(item); // Chama a função pai para atualizar o estado
+    onChangeText(item); 
     setIsOpen(false); 
   };
-
   return (
     <View style={styles.inputGroup}>
       <Text style={styles.label}>{label}</Text>
@@ -88,7 +60,7 @@ const EditableSelect = ({ label, value, onChangeText, options, placeholder }: an
         </TouchableOpacity>
       </View>
       {isOpen && (
-        <ScrollView style={styles.dropdownList} nestedScrollEnabled={true} keyboardShouldPersistTaps="handled">
+        <ScrollView style={styles.dropdownList} nestedScrollEnabled keyboardShouldPersistTaps="handled">
           {options.map((item: string, index: number) => (
             <TouchableOpacity key={index} style={styles.dropdownItem} onPress={() => handleSelect(item)}>
               <Text style={styles.dropdownText}>{item}</Text>
@@ -102,27 +74,13 @@ const EditableSelect = ({ label, value, onChangeText, options, placeholder }: an
 
 interface AddPotProps {
   onBack: () => void;
-  onComplete: (data: { 
-    name: string; 
-    plant: string;
-    plantType: string; 
-    macAddress: string; 
-    image?: string; 
-    description?: string;
-    ssid?: string;
-    ip?: string;
-  }) => void;
+  onComplete: (data: any) => void;
 }
 
 export const AddPotScreen: React.FC<AddPotProps> = ({ onBack, onComplete }) => {
   const [step, setStep] = useState(1);
   const [data, setData] = useState({ 
-    name: '', 
-    plant: '',      // Nome Popular (ex: Jiboia)
-    plantType: '',  // Espécie (ex: Epipremnum aureum)
-    location: '', 
-    description: '', 
-    image: null as string | null 
+    name: '', plant: '', plantType: '', location: '', description: '', image: null as string | null 
   });
   
   // Estados BLE
@@ -141,267 +99,220 @@ export const AddPotScreen: React.FC<AddPotProps> = ({ onBack, onComplete }) => {
   const [credentialsSentSuccess, setCredentialsSentSuccess] = useState(false);
   const [statusMessage, setStatusMessage] = useState('');
 
-  // --- LÓGICA PRINCIPAL: Preenchimento Automático ---
+  // Auto-preenchimento
   const handlePlantNameChange = (text: string) => {
-    // 1. Procura se existe uma espécie técnica para o nome digitado/selecionado
     const correspondingSpecies = PLANT_DATABASE[text];
-    
     setData(prev => ({
       ...prev,
-      plant: text, // Atualiza o campo "Selecionar a Planta"
-      // 2. Se encontrou a espécie no banco, preenche o campo "Espécie".
-      //    Se não encontrou, mantém o que o usuário já tinha ou deixa vazio.
+      plant: text,
       plantType: correspondingSpecies ? correspondingSpecies : prev.plantType
     }));
   };
 
-  // --- 1. PERMISSÕES ---
-  const requestBlePermissions = async () => {
-    if (Platform.OS === 'android' && Platform.Version >= 31) {
-        const result = await PermissionsAndroid.requestMultiple([
-            PermissionsAndroid.PERMISSIONS.BLUETOOTH_SCAN,
-            PermissionsAndroid.PERMISSIONS.BLUETOOTH_CONNECT,
-            PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION,
-        ]);
-        return result['android.permission.BLUETOOTH_CONNECT'] === 'granted';
-    }
-    return true;
-  };
-
-  // --- 2. SCAN BLE ---
+  // --- 1. SCAN BLE (Usando o Service) ---
   const startScan = useCallback(async () => {
-    const hasPerm = await requestBlePermissions();
-    if (!hasPerm) { Alert.alert('Permissão', 'Necessário Bluetooth'); return; }
-    setScanning(true); setDevices([]);
-    
-    bleManager.startDeviceScan([SERVICE_UUID], null, (error, device) => {
-      if (device && device.name) {
-        setDevices(prev => (!prev.find(d => d.id === device.id) ? [...prev, device] : prev));
-      }
+    const hasPerm = await bleService.requestPermissions();
+    if (!hasPerm) { 
+      Alert.alert('Permissão', 'Permissões de Bluetooth/Localização negadas.'); 
+      return; 
+    }
+
+    setScanning(true);
+    setDevices([]);
+
+    // Usa o método do serviço
+    bleService.startScan((device) => {
+      setDevices(prev => {
+        if (!prev.find(d => d.id === device.id)) {
+          return [...prev, device];
+        }
+        return prev;
+      });
     });
-    setTimeout(() => { bleManager.stopDeviceScan(); setScanning(false); }, 10000);
+
+    // Timeout de 10s
+    setTimeout(() => {
+      bleService.stopScan();
+      setScanning(false);
+    }, 10000);
   }, []);
 
-  useEffect(() => { if (step === 2) startScan(); return () => bleManager.stopDeviceScan(); }, [step, startScan]);
+  // Inicia scan ao entrar no passo 2
+  useEffect(() => {
+    if (step === 2) startScan();
+    return () => { bleService.stopScan(); };
+  }, [step, startScan]);
 
-  // --- 3. SCAN WIFI ---
+
+  // --- 2. SCAN WIFI ---
   const scanWifiNetworks = async () => {
     setIsWifiScanning(true);
     try {
-      if (Platform.OS === 'android') await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION);
+      if (Platform.OS === 'android') {
+        await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION);
+      }
       const list = await WifiManager.loadWifiList();
-      const unique = Array.from(new Set(list.filter(w=>w.SSID).map(w=>w.SSID))).map(ssid=>({ssid}));
-      setWifiList(unique as any[]);
-    } catch (e) { console.log(e); } finally { setIsWifiScanning(false); }
-  };
-  useEffect(() => { if (step === 3) scanWifiNetworks(); }, [step]);
-
-  // --- 4. ENVIAR CREDENCIAIS E CAPTURAR IP ---
-  const sendCredentialsToDevice = async () => {
-    if (!selectedDevice || !selectedSsid || !password) return;
-    setSendingCredentials(true);
-    setStatusMessage("Conectando ao vaso...");
-
-    try {
-      const connectedDevice = await selectedDevice.connect().then(d => d.discoverAllServicesAndCharacteristics());
-      setStatusMessage("Enviando credenciais...");
-
-      const jsonData = JSON.stringify({ ssid: selectedSsid, password: password });
-      await connectedDevice.writeCharacteristicWithResponseForService(SERVICE_UUID, CHAR_UUID, toBase64(jsonData));
-
-      setStatusMessage("Aguardando confirmação...");
-      
-      let attempts = 0;
-      const pollInterval = setInterval(async () => {
-        attempts++;
-        try {
-          const readChar = await connectedDevice.readCharacteristicForService(SERVICE_UUID, CHAR_UUID);
-          const responseJson = JSON.parse(fromBase64(readChar.value || ''));
-
-          if (responseJson.status === 'success') {
-            clearInterval(pollInterval);
-            setConnectionInfo({ ip: responseJson.ip, ssid: selectedSsid });
-            setCredentialsSentSuccess(true);
-            setSendingCredentials(false);
-            setStatusMessage("Conectado com sucesso!");
-            Alert.alert("Sucesso", `Vaso conectado! IP: ${responseJson.ip}`);
-          } 
-          else if (responseJson.status === 'error' || attempts > 30) {
-            clearInterval(pollInterval);
-            throw new Error("Falha ou Tempo esgotado.");
-          }
-        } catch (e: any) {
-           if(e.message.includes("disconnect") || attempts > 30) {
-             clearInterval(pollInterval); setSendingCredentials(false); setStatusMessage("Erro de conexão.");
-           }
-        }
-      }, 2000);
-    } catch (error: any) {
-      setSendingCredentials(false);
-      setStatusMessage("Falha ao conectar.");
-      Alert.alert("Erro", error.message);
+      const unique = Array.from(new Set(list.filter(w=>w.SSID).map(w=>w.SSID))).map(ssid => ({ ssid }));
+      setWifiList(unique);
+    } catch (e) { 
+      console.log("Wifi Scan Error", e); 
+    } finally { 
+      setIsWifiScanning(false); 
     }
   };
 
- const handleFinish = () => {
-  onComplete({ 
-    name: data.name,
-    plant: data.plant, // Nome popular
-    plantType: data.plantType, // Espécie
-    location: data.location, // <--- ADICIONE ESTA LINHA
-    image: data.image,
-    description: data.description,
-    macAddress: selectedDevice?.id || '',
-    ip: connectionInfo.ip,
-    ssid: connectionInfo.ssid
-  });
-};
+  useEffect(() => {
+    if (step === 3) scanWifiNetworks();
+  }, [step]);
 
-const handleSkip = () => {
-  onComplete({ 
-    name: data.name,
-    plant: data.plant,
-    plantType: data.plantType,
-    location: data.location, // <--- ADICIONE ESTA LINHA TAMBÉM
-    image: data.image,
-    description: data.description,
-    macAddress: '',
-    ip: '',
-    ssid: ''
-  });
-};
-  const handleImagePick = async (type: 'camera' | 'gallery') => {
-      if (type === 'camera' && Platform.OS === 'android') {
-        try {
-          const granted = await PermissionsAndroid.request(
-            PermissionsAndroid.PERMISSIONS.CAMERA,
-            {
-              title: "Permissão de Câmera",
-              message: "O App precisa de acesso à câmera para tirar fotos.",
-              buttonNeutral: "Perguntar depois",
-              buttonNegative: "Cancelar",
-              buttonPositive: "OK"
-            }
-          );
-          if (granted !== PermissionsAndroid.RESULTS.GRANTED) {
-            Alert.alert("Permissão Negada", "Você precisa permitir o acesso à câmera para tirar fotos.");
-            return;
-          }
-        } catch (err) {
-          console.warn(err);
-          return;
-        }
-      }
 
-      const fn = type === 'camera' ? launchCamera : launchImageLibrary;
-      
-      try {
-        const result = await fn({ 
-            mediaType: 'photo', 
-            quality: 0.7, 
-            selectionLimit: 1,
-            saveToPhotos: false 
-        });
+  // --- 3. ENVIAR CREDENCIAIS (Usando o Service) ---
+  const sendCredentialsToDevice = async () => {
+    if (!selectedDevice || !selectedSsid || !password) {
+      Alert.alert("Erro", "Preencha todos os campos.");
+      return;
+    }
+    
+    setSendingCredentials(true);
+    setStatusMessage("Conectando ao Vaso...");
 
-        if (result.didCancel) return;
-        if (result.errorCode) {
-            Alert.alert('Erro', result.errorMessage || 'Erro ao abrir câmera');
-            return;
-        }
-        if (result.assets?.[0]?.uri) {
-            setData(prev => ({ ...prev, image: result.assets![0].uri || null }));
-        }
-      } catch (error) {
-          console.error("Erro no picker:", error);
-      }
+    try {
+      // Chamada simplificada graças ao BleService!
+      const result = await bleService.sendWifiCredentials(
+        selectedDevice, 
+        selectedSsid, 
+        password
+      );
+
+      // Sucesso
+      setConnectionInfo({ ip: result.ip, ssid: result.ssid });
+      setCredentialsSentSuccess(true);
+      setStatusMessage(`Conectado! IP: ${result.ip}`);
+      Alert.alert("Sucesso", `Vaso conectado!\nIP: ${result.ip}`);
+
+    } catch (error: any) {
+      console.error(error);
+      setStatusMessage("Falha na conexão.");
+      Alert.alert("Erro", error.message || "Não foi possível conectar o vaso ao Wi-Fi.");
+    } finally {
+      setSendingCredentials(false);
+    }
   };
 
-  // --- RENDER STEP 1 ---
+  const handleFinish = () => {
+    onComplete({ 
+      name: data.name,
+      plant: data.plant, 
+      plantType: data.plantType,
+      location: data.location,
+      image: data.image,
+      description: data.description,
+      macAddress: selectedDevice?.id || 'UNKNOWN',
+      ip: connectionInfo.ip,
+      ssid: connectionInfo.ssid
+    });
+  };
+
+  const handleSkip = () => {
+    onComplete({ 
+      name: data.name,
+      plant: data.plant,
+      plantType: data.plantType,
+      location: data.location,
+      image: data.image,
+      description: data.description,
+      macAddress: 'UNKNOWN',
+      ip: '0.0.0.0',
+      ssid: ''
+    });
+  };
+
+  const handleImagePick = async (type: 'camera' | 'gallery') => {
+      if (type === 'camera' && Platform.OS === 'android') {
+        const granted = await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.CAMERA);
+        if (granted !== PermissionsAndroid.RESULTS.GRANTED) return;
+      }
+      const fn = type === 'camera' ? launchCamera : launchImageLibrary;
+      fn({ mediaType: 'photo', quality: 0.5, saveToPhotos: false }, (res) => {
+         if (res.assets?.[0]?.uri) setData(prev => ({ ...prev, image: res.assets![0].uri || null }));
+      });
+  };
+
+  // --- RENDERS ---
   const renderStep1 = () => (
     <View style={styles.stepContainer}>
       <View style={styles.imageUploadContainer}>
         <TouchableOpacity style={styles.imageCircle} onPress={() => Alert.alert("Foto", "Origem:", [{text:"Câmera", onPress:()=>handleImagePick('camera')}, {text:"Galeria", onPress:()=>handleImagePick('gallery')}])}>
           {data.image ? <Image source={{ uri: data.image }} style={styles.uploadedImage} /> : <Camera size={40} color={colors.white} />}
         </TouchableOpacity>
-        <TouchableOpacity style={styles.addPhotoButton} onPress={() => Alert.alert("Foto", "Origem:", [{text:"Câmera", onPress:()=>handleImagePick('camera')}, {text:"Galeria", onPress:()=>handleImagePick('gallery')}])}>
-            <Text style={styles.addPhotoButtonText}>Inserir Foto</Text>
-        </TouchableOpacity>
+        <Text style={{color:'#666', fontSize: 12, marginTop: 4}}>Toque para editar</Text>
       </View>
 
       <View style={styles.inputGroup}>
-        <Text style={styles.label}>Nome do vaso</Text>
-        <TextInput style={styles.input} placeholder="Insira o nome do vaso" placeholderTextColor="#9CA3AF" value={data.name} onChangeText={(t) => setData({ ...data, name: t })} />
+        <Text style={styles.label}>Nome do Vaso</Text>
+        <TextInput style={styles.input} placeholder="Ex: Vaso da Sala" placeholderTextColor="#9CA3AF" value={data.name} onChangeText={(t) => setData({ ...data, name: t })} />
       </View>
       <View style={styles.inputGroup}>
-        <Text style={styles.label}>Local da Planta</Text>
-        <TextInput style={styles.input} placeholder="Ex: na Varanda" placeholderTextColor="#9CA3AF" value={data.location} onChangeText={(t) => setData({ ...data, location: t })} />
+        <Text style={styles.label}>Localização</Text>
+        <TextInput style={styles.input} placeholder="Ex: Varanda" placeholderTextColor="#9CA3AF" value={data.location} onChangeText={(t) => setData({ ...data, location: t })} />
       </View>
       
-      {/* CAMPO 1: Selecionar Planta (Nome Popular) 
-        Ao mudar este campo, dispara 'handlePlantNameChange' que preenche o campo abaixo.
-      */}
-      <EditableSelect 
-        label="Selecionar nome popular da planta" 
-        value={data.plant} 
-        onChangeText={handlePlantNameChange} 
-        options={PREDEFINED_NAMES} 
-        placeholder="Selecione ou digite..." 
-      />
-      
-      {/* CAMPO 2: Espécie da Planta (Detalhes Técnicos)
-        Este campo recebe automaticamente o valor da espécie baseado no campo acima.
-      */}
-      <EditableSelect 
-        label="Espécie da Planta" 
-        value={data.plantType} 
-        onChangeText={(t: string) => setData({ ...data, plantType: t })} 
-        options={PREDEFINED_SPECIES} 
-        placeholder="Preenchimento automático..." 
-      />
+      <EditableSelect label="Planta (Nome Popular)" value={data.plant} onChangeText={handlePlantNameChange} options={PREDEFINED_NAMES} placeholder="Selecione..." />
+      <EditableSelect label="Espécie Técnica" value={data.plantType} onChangeText={(t: string) => setData({ ...data, plantType: t })} options={PREDEFINED_SPECIES} placeholder="Automático..." />
 
       <View style={styles.inputGroup}>
-        <Text style={styles.label}>Descrição da Planta</Text>
-        <TextInput style={[styles.input, styles.textArea]} placeholder="Insira uma breve descrição" placeholderTextColor="#9CA3AF" value={data.description} onChangeText={(t) => setData({ ...data, description: t })} multiline numberOfLines={4} textAlignVertical="top" />
+        <Text style={styles.label}>Descrição</Text>
+        <TextInput style={[styles.input, styles.textArea]} placeholder="Observações..." placeholderTextColor="#9CA3AF" value={data.description} onChangeText={(t) => setData({ ...data, description: t })} multiline numberOfLines={3} textAlignVertical="top" />
       </View>
     </View>
   );
 
-  // --- RENDER STEP 2 e 3 (Mantidos iguais) ---
   const renderStep2 = () => (
     <View style={styles.stepContainer}>
       <View style={styles.scanHeader}>
         <Bluetooth size={48} color={colors.primary} />
-        <Text style={styles.scanTitle}>{scanning ? 'Procurando Vasos...' : 'Dispositivos Encontrados'}</Text>
-        <Text style={styles.scanSubtitle}>Selecione seu vaso inteligente na lista abaixo.</Text>
+        <Text style={styles.scanTitle}>{scanning ? 'Buscando dispositivos...' : 'Dispositivos Encontrados'}</Text>
+        <Text style={styles.scanSubtitle}>Certifique-se que o vaso está ligado.</Text>
         {scanning && <ActivityIndicator color={colors.primary} style={{ marginTop: 10 }} />}
       </View>
+
       <ScrollView style={styles.deviceList} nestedScrollEnabled>
         {devices.length === 0 && !scanning && <Text style={styles.noDeviceText}>Nenhum dispositivo encontrado.</Text>}
+        
         {devices.map((device) => (
           <TouchableOpacity key={device.id} style={[styles.deviceItem, selectedDevice?.id === device.id && styles.deviceItemSelected]} onPress={() => setSelectedDevice(device)}>
             <View style={styles.deviceIcon}><Sprout size={24} color={selectedDevice?.id === device.id ? '#fff' : colors.primary} /></View>
-            <View>
-              <Text style={[styles.deviceName, selectedDevice?.id === device.id && styles.deviceNameSelected]}>{device.name || 'Vaso Sem Nome'}</Text>
+            <View style={{flex: 1}}>
+              <Text style={[styles.deviceName, selectedDevice?.id === device.id && styles.deviceNameSelected]}>
+                {device.name || 'Dispositivo Desconhecido'}
+              </Text>
               <Text style={[styles.deviceMac, selectedDevice?.id === device.id && styles.deviceMacSelected]}>{device.id}</Text>
             </View>
             {selectedDevice?.id === device.id && <View style={styles.checkCircle}><Check size={16} color={colors.primary} /></View>}
           </TouchableOpacity>
         ))}
       </ScrollView>
-      {!scanning && <TouchableOpacity onPress={startScan} style={styles.rescanBtn}><Text style={styles.rescanText}>Escanear Novamente</Text></TouchableOpacity>}
+
+      {!scanning && (
+        <TouchableOpacity onPress={startScan} style={styles.rescanBtn}>
+          <RefreshCw size={20} color={colors.primary} />
+          <Text style={styles.rescanText}> Escanear Novamente</Text>
+        </TouchableOpacity>
+      )}
     </View>
   );
 
   const renderStep3 = () => (
     <View style={styles.stepContainer}>
       <View style={styles.connectHeader}>
-        <View style={styles.iconRow}><Wifi size={32} color={colors.primary} /></View>
-        <Text style={styles.connectTitle}>Configurar Wi-Fi do Vaso</Text>
-        <Text style={styles.connectSubtitle}>Selecione a rede e insira a senha.</Text>
+        <Wifi size={32} color={colors.primary} />
+        <Text style={styles.connectTitle}>Conectar ao Wi-Fi</Text>
+        <Text style={styles.connectSubtitle}>O vaso precisa de internet para funcionar.</Text>
       </View>
+
       <View style={styles.wifiListContainer}>
         <View style={styles.wifiHeaderRow}>
-          <Text style={styles.label}>Redes Disponíveis</Text>
+          <Text style={styles.label}>Selecione sua Rede (2.4GHz)</Text>
           <TouchableOpacity onPress={scanWifiNetworks} disabled={isWifiScanning}>
               {isWifiScanning ? <ActivityIndicator size="small" color={colors.primary} /> : <RefreshCw size={16} color={colors.primary} />}
           </TouchableOpacity>
@@ -409,25 +320,26 @@ const handleSkip = () => {
         <ScrollView style={styles.wifiScrollView} nestedScrollEnabled>
           {wifiList.map((wifi, index) => (
             <TouchableOpacity key={`${wifi.ssid}_${index}`} style={[styles.wifiItem, selectedSsid === wifi.ssid && styles.wifiItemSelected]} onPress={() => setSelectedSsid(wifi.ssid)}>
-              <Wifi size={20} color={selectedSsid === wifi.ssid ? colors.primary : '#9CA3AF'} />
               <Text style={[styles.wifiText, selectedSsid === wifi.ssid && styles.wifiTextSelected]}>{wifi.ssid}</Text>
               {selectedSsid === wifi.ssid && <Check size={16} color={colors.primary} />}
             </TouchableOpacity>
           ))}
         </ScrollView>
       </View>
+
       {selectedSsid ? (
         <View style={styles.passwordContainer}>
-          <Text style={styles.label}>Senha para "{selectedSsid}"</Text>
+          <Text style={styles.label}>Senha da rede "{selectedSsid}"</Text>
           <View style={styles.inputWithIcon}>
               <Lock size={20} color="#9CA3AF" style={styles.inputIcon} />
-              <TextInput style={[styles.input, { paddingLeft: 40 }]} placeholder="Senha do Wi-Fi" placeholderTextColor="#9CA3AF" secureTextEntry value={password} onChangeText={setPassword} />
+              <TextInput style={[styles.input, { paddingLeft: 40 }]} placeholder="Senha" placeholderTextColor="#9CA3AF" secureTextEntry value={password} onChangeText={setPassword} />
           </View>
+          
           <TouchableOpacity style={[styles.sendCredsButton, (sendingCredentials || credentialsSentSuccess || !password) && styles.buttonDisabled]} onPress={sendCredentialsToDevice} disabled={sendingCredentials || credentialsSentSuccess || !password}>
             {sendingCredentials ? <ActivityIndicator color="#fff" size="small" /> : credentialsSentSuccess ? (
               <View style={{flexDirection: 'row', alignItems: 'center'}}><Check size={18} color="#fff" style={{marginRight: 8}} /><Text style={styles.sendCredsButtonText}>Configurado!</Text></View>
             ) : (
-              <View style={{flexDirection: 'row', alignItems: 'center'}}><Send size={18} color="#fff" style={{marginRight: 8}} /><Text style={styles.sendCredsButtonText}>Enviar para o Vaso</Text></View>
+              <View style={{flexDirection: 'row', alignItems: 'center'}}><Send size={18} color="#fff" style={{marginRight: 8}} /><Text style={styles.sendCredsButtonText}>Enviar Dados</Text></View>
             )}
           </TouchableOpacity>
           {statusMessage !== '' && <Text style={{textAlign: 'center', marginTop: 8, color: '#666', fontSize: 12}}>{statusMessage}</Text>}
@@ -442,7 +354,7 @@ const handleSkip = () => {
       <View style={styles.header}>
         <View style={styles.navRow}>
           <TouchableOpacity onPress={onBack} style={styles.backButton}><ChevronLeft color="#fff" size={28} /></TouchableOpacity>
-          <Text style={styles.headerTitle}>Nova Planta</Text>
+          <Text style={styles.headerTitle}>Adicionar Planta</Text>
           <View style={{ width: 28 }} /> 
         </View>
         <View style={styles.stepperContainer}>
@@ -469,8 +381,9 @@ const handleSkip = () => {
               disabled={(step === 1 && !data.name) || (step === 2 && !selectedDevice) || (step === 3 && !credentialsSentSuccess)}
               onPress={() => step < 3 ? setStep(step + 1) : handleFinish()}
             >
-              <Text style={styles.actionButtonText}>{step === 3 ? 'FINALIZAR CADASTRO' : 'CONTINUAR'}</Text>
+              <Text style={styles.actionButtonText}>{step === 3 ? 'FINALIZAR' : 'CONTINUAR'}</Text>
             </TouchableOpacity>
+            
             {step >= 2 && !credentialsSentSuccess && (
               <TouchableOpacity style={styles.skipButton} onPress={handleSkip}>
                 <Text style={styles.skipButtonText}>Pular Configuração de Conexão</Text>
@@ -502,8 +415,6 @@ const styles = StyleSheet.create({
   imageUploadContainer: { alignItems: 'center', marginBottom: 30 },
   imageCircle: { width: 100, height: 100, borderRadius: 50, backgroundColor: '#D9D9D9', justifyContent: 'center', alignItems: 'center', borderWidth: 2, borderColor: '#D9D9D9', marginBottom: 12, overflow: 'hidden' },
   uploadedImage: { width: 100, height: 100 },
-  addPhotoButton: { backgroundColor: '#8AB530', paddingVertical: 10, paddingHorizontal: 24, borderRadius: 20, borderWidth: 1, borderColor: colors.primary },
-  addPhotoButtonText: { color: colors.white, fontWeight: 'bold', fontSize: 14 },
   inputGroup: { marginBottom: 20 },
   label: { fontSize: 14, fontWeight: 'bold', color: '#374151', marginBottom: 8, marginLeft: 4 },
   input: { backgroundColor: '#F9FAFB', borderWidth: 1, borderColor: '#E5E7EB', borderRadius: 16, padding: 16, fontSize: 16, color: '#1F2937' },
@@ -529,10 +440,9 @@ const styles = StyleSheet.create({
   deviceMacSelected: { color: colors.primaryLight },
   noDeviceText: { textAlign: 'center', color: '#9CA3AF', marginTop: 20 },
   checkCircle: { marginLeft: 'auto', backgroundColor: '#fff', borderRadius: 10, padding: 4 },
-  rescanBtn: { alignItems: 'center', padding: 10 },
-  rescanText: { color: colors.primary, fontWeight: 'bold' },
+  rescanBtn: { flexDirection: 'row', justifyContent:'center', alignItems: 'center', padding: 10, marginTop: 10 },
+  rescanText: { color: colors.primary, fontWeight: 'bold', marginLeft: 6 },
   connectHeader: { alignItems: 'center', marginBottom: 20 },
-  iconRow: { flexDirection: 'row', alignItems: 'center', marginBottom: 16 },
   connectTitle: { fontSize: 20, fontWeight: 'bold', color: '#374151', marginBottom: 8 },
   connectSubtitle: { textAlign: 'center', color: '#6B7280', paddingHorizontal: 20 },
   wifiListContainer: { marginBottom: 20 },
@@ -543,12 +453,12 @@ const styles = StyleSheet.create({
   wifiText: { marginLeft: 12, flex: 1, fontSize: 16, color: '#374151' },
   wifiTextSelected: { fontWeight: 'bold', color: colors.primary },
   passwordContainer: { marginTop: 10, marginBottom: 20 },
-  sendCredsButton: { flexDirection: 'row', backgroundColor: colors.primary, paddingVertical: 14, borderRadius: 16, alignItems: 'center', justifyContent: 'center', marginTop: 16 },
+  sendCredsButton: { flexDirection: 'row', backgroundColor: colors.primary, paddingVertical: 14, borderRadius: 16, alignItems: 'center', justifyContent: 'center', marginTop: 10 },
   sendCredsButtonText: { color: '#fff', fontWeight: 'bold', fontSize: 16 },
-  footer: { position: 'absolute', bottom: 0, left: 0, right: 0, padding: 24, backgroundColor: '#fff', borderTopWidth: 1, borderTopColor: '#F3F4F6', elevation: 10 },
-  actionButton: { backgroundColor: colors.primary, paddingVertical: 18, borderRadius: 30, alignItems: 'center', shadowColor: colors.primary, shadowOpacity: 0.3, shadowOffset: { width: 0, height: 4 }, elevation: 5, marginBottom: 12 },
-  buttonDisabled: { backgroundColor: '#D1D5DB', shadowOpacity: 0, elevation: 0 },
-  actionButtonText: { color: '#fff', fontWeight: 'bold', fontSize: 16, letterSpacing: 1 },
-  skipButton: { alignItems: 'center', paddingVertical: 10 },
-  skipButtonText: { color: '#9CA3AF', fontSize: 14, fontWeight: '600', textDecorationLine: 'underline' }
+  buttonDisabled: { backgroundColor: '#9CA3AF', opacity: 0.7 },
+  footer: { padding: 30, backgroundColor: '#fff', borderTopWidth: 1, borderTopColor: '#F3F4F6' },
+  actionButton: { backgroundColor: colors.primary, paddingVertical: 18, borderRadius: 20, alignItems: 'center', shadowColor: colors.primary, shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 8, elevation: 6 },
+  actionButtonText: { color: '#fff', fontSize: 18, fontWeight: 'bold' },
+  skipButton: { marginTop: 16, alignItems: 'center', padding: 8 },
+  skipButtonText: { color: '#9CA3AF', fontSize: 14, fontWeight: '600' }
 });
